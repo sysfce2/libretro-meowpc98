@@ -6,6 +6,14 @@
 typedef FILE *			FILEH;
 #define	FILEH_INVALID		NULL
 
+#if defined(__LIBRETRO__)
+struct retro_vfs_interface;
+/* Hands the frontend's VFS to file_open()/file_open_rb()/file_create(), which
+ * need it for paths no C library call can open - on Android every path the
+ * frontend passes is a Storage Access Framework content:// URI. */
+void dosio_set_vfs_interface(struct retro_vfs_interface *iface);
+#endif
+
 #define	FSEEK_SET		SEEK_SET
 #define	FSEEK_CUR		SEEK_CUR
 #define	FSEEK_END		SEEK_END
