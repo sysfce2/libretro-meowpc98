@@ -1,3 +1,7 @@
+#if defined(__LIBRETRO__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE	/* fopencookie */
+#endif
+
 #include "compiler.h"
 
 #include <sys/stat.h>
@@ -27,6 +31,159 @@ static OEMCHAR *curfilep = curpath;
 #endif
 
 
+#if defined(__LIBRETRO__)
+#include "libretro.h"
+
+static struct retro_vfs_interface *vfs_iface;
+
+void
+dosio_set_vfs_interface(struct retro_vfs_interface *iface)
+{
+
+	vfs_iface = iface;
+}
+
+/* A path the frontend hands over can be one only the frontend can open:
+ * Android's Storage Access Framework uses content:// URIs, which no C library
+ * resolves. FILEH is a FILE * all over the emulator, so rather than converting
+ * every caller, wrap the frontend's file handle in a FILE *. */
+#if defined(__BIONIC__) || defined(__ANDROID__)
+#define NP2_HAVE_VFS_FILE 1
+/* funopen64 only exists from API 24 on; below that funopen is all there is,
+ * and its offsets are as wide as off_t. */
+#if defined(__ANDROID_API__) && __ANDROID_API__ >= 24
+typedef fpos64_t	vfs_fpos_t;
+#define VFS_FUNOPEN	funopen64
+#else
+typedef fpos_t		vfs_fpos_t;
+#define VFS_FUNOPEN	funopen
+#endif
+
+static int
+vfs_read_cb(void *c, char *buf, int size)
+{
+	int64_t got = vfs_iface->read((struct retro_vfs_file_handle *)c, buf, (uint64_t)size);
+	return (got < 0 ? -1 : (int)got);
+}
+
+static int
+vfs_write_cb(void *c, const char *buf, int size)
+{
+	int64_t put = vfs_iface->write((struct retro_vfs_file_handle *)c, buf, (uint64_t)size);
+	return (put < 0 ? -1 : (int)put);
+}
+
+static vfs_fpos_t
+vfs_seek_cb(void *c, vfs_fpos_t off, int whence)
+{
+	int pos = (whence == SEEK_SET ? RETRO_VFS_SEEK_POSITION_START :
+	           whence == SEEK_CUR ? RETRO_VFS_SEEK_POSITION_CURRENT :
+	                                RETRO_VFS_SEEK_POSITION_END);
+
+	/* The seek return value is 0 on success in some frontends and the new
+	 * offset in others, so ask tell() for the position instead. */
+	if (vfs_iface->seek((struct retro_vfs_file_handle *)c, (int64_t)off, pos) < 0)
+		return (vfs_fpos_t)-1;
+	return (vfs_fpos_t)vfs_iface->tell((struct retro_vfs_file_handle *)c);
+}
+
+static int
+vfs_close_cb(void *c)
+{
+
+	return vfs_iface->close((struct retro_vfs_file_handle *)c);
+}
+
+static FILE *
+vfs_wrap(struct retro_vfs_file_handle *h)
+{
+	FILE *f = VFS_FUNOPEN(h, vfs_read_cb, vfs_write_cb, vfs_seek_cb, vfs_close_cb);
+
+	if (f == NULL)
+		vfs_iface->close(h);
+	return f;
+}
+#elif defined(__GLIBC__)
+#define NP2_HAVE_VFS_FILE 1
+
+static ssize_t
+vfs_read_cb(void *c, char *buf, size_t size)
+{
+	int64_t got = vfs_iface->read((struct retro_vfs_file_handle *)c, buf, (uint64_t)size);
+	return (got < 0 ? -1 : (ssize_t)got);
+}
+
+static ssize_t
+vfs_write_cb(void *c, const char *buf, size_t size)
+{
+	int64_t put = vfs_iface->write((struct retro_vfs_file_handle *)c, buf, (uint64_t)size);
+	return (put < 0 ? -1 : (ssize_t)put);
+}
+
+static int
+vfs_seek_cb(void *c, off64_t *off, int whence)
+{
+	int pos = (whence == SEEK_SET ? RETRO_VFS_SEEK_POSITION_START :
+	           whence == SEEK_CUR ? RETRO_VFS_SEEK_POSITION_CURRENT :
+	                                RETRO_VFS_SEEK_POSITION_END);
+	int64_t at;
+
+	/* See the note in the bionic version above. */
+	if (vfs_iface->seek((struct retro_vfs_file_handle *)c, (int64_t)*off, pos) < 0)
+		return -1;
+	at = vfs_iface->tell((struct retro_vfs_file_handle *)c);
+	if (at < 0)
+		return -1;
+	*off = (off64_t)at;
+	return 0;
+}
+
+static int
+vfs_close_cb(void *c)
+{
+
+	return vfs_iface->close((struct retro_vfs_file_handle *)c);
+}
+
+static FILE *
+vfs_wrap(struct retro_vfs_file_handle *h)
+{
+	cookie_io_functions_t fns = { vfs_read_cb, vfs_write_cb, vfs_seek_cb, vfs_close_cb };
+	FILE *f = fopencookie(h, "r+", fns);
+
+	if (f == NULL)
+		vfs_iface->close(h);
+	return f;
+}
+#endif	/* bionic / glibc */
+
+static FILEH
+vfs_open(const OEMCHAR *path, const char *mode)
+{
+#if defined(NP2_HAVE_VFS_FILE)
+	struct retro_vfs_file_handle *h;
+	unsigned access;
+
+	if (vfs_iface == NULL || strstr(path, "://") == NULL)
+		return NULL;
+
+	access = (strchr(mode, 'w') != NULL) ? RETRO_VFS_FILE_ACCESS_WRITE :
+	         (strchr(mode, '+') != NULL) ? (RETRO_VFS_FILE_ACCESS_READ_WRITE |
+	                                        RETRO_VFS_FILE_ACCESS_UPDATE_EXISTING) :
+	                                       RETRO_VFS_FILE_ACCESS_READ;
+	h = vfs_iface->open(path, access, RETRO_VFS_FILE_ACCESS_HINT_NONE);
+	if (h == NULL)
+		return NULL;
+	return vfs_wrap(h);
+#else
+	(void)path;
+	(void)mode;
+	return NULL;
+#endif
+}
+#endif	/* __LIBRETRO__ */
+
+
 void
 dosio_init(void)
 {
@@ -47,6 +204,14 @@ file_open(const OEMCHAR *path)
 {
 	FILEH fh;
 
+#if defined(__LIBRETRO__)
+	fh = vfs_open(path, "rb+");
+	if (fh)
+		return fh;
+	fh = vfs_open(path, "rb");
+	if (fh)
+		return fh;
+#endif
 	fh = fopen(path, "rb+");
 	if (fh)
 		return fh;
@@ -56,14 +221,24 @@ file_open(const OEMCHAR *path)
 FILEH
 file_open_rb(const OEMCHAR *path)
 {
+#if defined(__LIBRETRO__)
+	FILEH fh = vfs_open(path, "rb");
 
+	if (fh)
+		return fh;
+#endif
 	return fopen(path, "rb");
 }
 
 FILEH
 file_create(const OEMCHAR *path)
 {
+#if defined(__LIBRETRO__)
+	FILEH fh = vfs_open(path, "wb+");
 
+	if (fh)
+		return fh;
+#endif
 	return fopen(path, "wb+");
 }
 
@@ -102,6 +277,20 @@ file_getsize(FILEH handle)
 {
 	struct stat sb;
 
+#if defined(NP2_HAVE_VFS_FILE)
+	/* A VFS-backed stream has no file descriptor for fstat() to work from,
+	 * so measure it by seeking instead. */
+	if (fileno(handle) < 0) {
+		long cur = ftell(handle);
+		long end;
+
+		if ((cur < 0) || (fseek(handle, 0, SEEK_END) != 0))
+			return 0;
+		end = ftell(handle);
+		fseek(handle, cur, SEEK_SET);
+		return (end < 0) ? 0 : (UINT)end;
+	}
+#endif
 	if (fstat(fileno(handle), &sb) == 0)
 		return sb.st_size;
 	return 0;
@@ -153,6 +342,23 @@ file_getdatetime(FILEH handle, DOSDATE *dosdate, DOSTIME *dostime)
 {
 	struct stat sb;
 
+#if defined(NP2_HAVE_VFS_FILE)
+	/* No descriptor to stat, and the frontend's VFS has no timestamps to
+	 * offer either - hand back a fixed date rather than an error. */
+	if (fileno(handle) < 0) {
+		if (dosdate) {
+			dosdate->year = 2000;
+			dosdate->month = 1;
+			dosdate->day = 1;
+		}
+		if (dostime) {
+			dostime->hour = 0;
+			dostime->minute = 0;
+			dostime->second = 0;
+		}
+		return 0;
+	}
+#endif
 	if ((fstat(fileno(handle), &sb) == 0)
 	 && (cnvdatetime(&sb, dosdate, dostime) == SUCCESS))
 		return 0;

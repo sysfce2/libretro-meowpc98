@@ -479,6 +479,7 @@ void retro_set_input_state(retro_input_state_t cb)
 void retro_set_environment(retro_environment_t cb)
 {
    struct retro_log_callback logging;
+   struct retro_vfs_interface_info vfs_iface_info;
    
    environ_cb = cb;
    
@@ -510,7 +511,16 @@ void retro_set_environment(retro_environment_t cb)
       log_cb = logging.log;
    else
       log_cb = NULL;
-   
+
+   /* The core needs the full path to its disk images, and on Android that
+    * path is a Storage Access Framework content:// URI, which no C library
+    * call can open - so hand the frontend's VFS to dosio. */
+   vfs_iface_info.required_interface_version = 1;
+   vfs_iface_info.iface                      = NULL;
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VFS_INTERFACE, &vfs_iface_info)
+         && vfs_iface_info.iface != NULL)
+      dosio_set_vfs_interface(vfs_iface_info.iface);
+
    cb(RETRO_ENVIRONMENT_SET_VARIABLES, variables);
 }
 
