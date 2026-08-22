@@ -35,6 +35,7 @@ SOURCES_C := $(NP2_PATH)/libretro/libretro.c \
 		$(NP2_PATH)/libretro/libretro-common/file/file_path.c \
 		$(NP2_PATH)/libretro/libretro-common/file/retro_stat.c \
 		$(NP2_PATH)/libretro/libretro-common/streams/file_stream.c \
+		$(NP2_PATH)/libretro/libretro-common/string/rstrtod.c \
 		$(NP2_PATH)/libretro/libretro-common/string/stdstring.c \
 		$(NP2_PATH)/calendar.c \
 		$(NP2_PATH)/debugsub.c \
